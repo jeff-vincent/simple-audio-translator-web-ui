@@ -6,50 +6,45 @@ const AudioRecorder = () => {
   const [isRecording, setIsRecording] = useState(false);
   const [status, setStatus] = useState('');
   const [audioUrl, setAudioUrl] = useState(null); // For processed audio
+  const [isLoading, setIsLoading] = useState(false); // Loading state
   const mediaRecorderRef = useRef(null);
   const socketRef = useRef(null);
   const audioChunksRef = useRef([]); // For raw recorded audio
   const processedAudioChunksRef = useRef([]); // For processed audio from server
-  const audioPlayerRef = useRef(null);
+  const audioPlayerKeyRef = useRef(0); // Key to force re-rendering of the audio player
 
   useEffect(() => {
-    // Open WebSocket connection on page load
     const socket = new WebSocket('ws://localhost:8000/ws/audio');
     socketRef.current = socket;
 
-    socket.onopen = () => {
-      setStatus('WebSocket connected.');
-      console.log('WebSocket connection established.');
-    };
+    socket.onopen = () => setStatus('WebSocket connected.');
 
     socket.onmessage = (event) => {
       const chunk = event.data;
-      console.log('Received processed audio chunk');
       processedAudioChunksRef.current.push(chunk);
 
-      // Update the audio URL dynamically to include all received chunks
       const processedBlob = new Blob(processedAudioChunksRef.current, { type: 'audio/wav' });
       const url = URL.createObjectURL(processedBlob);
+
+      // Revoke the previous URL to free up memory
+      if (audioUrl) {
+        URL.revokeObjectURL(audioUrl);
+      }
+
       setAudioUrl(url);
+      setIsLoading(false);
     };
 
     socket.onerror = (error) => {
       console.error('WebSocket error:', error);
       setStatus('WebSocket error. Check server connection.');
+      setIsLoading(false);
     };
 
-    socket.onclose = () => {
-      setStatus('WebSocket closed.');
-      console.log('WebSocket connection closed.');
-    };
+    socket.onclose = () => setStatus('WebSocket closed.');
 
-    // Cleanup WebSocket on component unmount
-    return () => {
-      if (socketRef.current) {
-        socketRef.current.close();
-      }
-    };
-  }, []);
+    return () => socketRef.current?.close();
+  }, [audioUrl]);
 
   const startRecording = async () => {
     try {
@@ -68,6 +63,9 @@ const AudioRecorder = () => {
         stopRecording();
       };
 
+      processedAudioChunksRef.current = [];
+      setAudioUrl(null);
+
       mediaRecorder.start();
       setIsRecording(true);
       setStatus('Recording...');
@@ -79,14 +77,14 @@ const AudioRecorder = () => {
 
   const stopRecording = () => {
     if (mediaRecorderRef.current) {
+      mediaRecorderRef.current.onstop = () => {
+        setIsRecording(false);
+        setStatus('Recording stopped.');
+        sendRecordedAudio();
+      };
+
       mediaRecorderRef.current.stop();
     }
-
-    setIsRecording(false);
-    setStatus('Recording stopped.');
-
-    // Send the recorded audio to the server
-    sendRecordedAudio();
   };
 
   const sendRecordedAudio = () => {
@@ -98,25 +96,74 @@ const AudioRecorder = () => {
     if (socketRef.current?.readyState === WebSocket.OPEN) {
       const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
       audioBlob.arrayBuffer().then((buffer) => {
-        socketRef.current.send(buffer); // Send the entire recorded audio for processing
-        setStatus('Sending recorded audio for processing...');
+        socketRef.current.send(buffer);
+        setStatus('Translating audio...');
+        setIsLoading(true);
       });
     } else {
       console.warn('WebSocket is not open. Cannot send audio.');
-      setStatus('WebSocket is not open.');
+      setStatus('Refresh the page to start a new translation session.');
     }
   };
 
   const playAudio = () => {
-    if (audioPlayerRef.current) {
-      audioPlayerRef.current.play();
+    const audioPlayer = document.getElementById('audio-player');
+    if (audioPlayer) {
+      audioPlayer.play();
+    }
+  };
+
+  const deleteAudio = () => {
+    // Clear audio data
+    if (audioUrl) {
+      URL.revokeObjectURL(audioUrl); // Revoke the object URL to free memory
+    }
+
+    setAudioUrl(null);
+    processedAudioChunksRef.current = [];
+    setStatus('Audio deleted.');
+
+    // Force re-render of the audio player by updating its key
+    audioPlayerKeyRef.current += 1;
+  };
+
+  const saveAudio = async () => {
+    if (!audioUrl) {
+      setStatus('No audio to save.');
+      return;
+    }
+
+    try {
+      const response = await fetch(audioUrl);
+      const blob = await response.blob();
+
+      const formData = new FormData();
+      formData.append('audio', blob, 'audio.wav');
+
+      const result = await fetch('http://localhost:8000/store', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (result.ok) {
+        setStatus('Audio saved successfully!');
+      } else {
+        setStatus('Failed to save audio.');
+      }
+
+      // Clear the audio data (similar to delete)
+      deleteAudio(); // Reset the component after saving
+
+    } catch (error) {
+      console.error('Error saving audio:', error);
+      setStatus('Error occurred while saving audio.');
     }
   };
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-100 p-6">
       <div className="max-w-md w-full bg-white p-8 rounded-xl shadow-lg space-y-6">
-        <h1 className="text-2xl font-semibold text-center text-gray-800">Audio Recorder</h1>
+        <h1 className="text-2xl font-semibold text-center text-gray-800">Audio Translator</h1>
         <p className="text-center text-gray-500">Status: {status}</p>
 
         <div className="flex justify-center">
@@ -131,15 +178,37 @@ const AudioRecorder = () => {
         </div>
 
         <div className="text-center">
+          {isLoading && (
+            <div className="flex justify-center items-center space-x-2">
+              <div className="w-5 h-5 rounded-full bg-blue-500 animate-bounce"></div>
+              <div className="w-5 h-5 rounded-full bg-blue-500 animate-bounce delay-75"></div>
+              <div className="w-5 h-5 rounded-full bg-blue-500 animate-bounce delay-150"></div>
+            </div>
+          )}
+
           {audioUrl && (
             <div className="space-y-2">
-              <audio ref={audioPlayerRef} src={audioUrl} controls className="w-full h-10" />
-              <button
-                onClick={playAudio}
-                className="w-full py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition"
-              >
-                Play Processed Audio
-              </button>
+              <audio
+                key={audioPlayerKeyRef.current} // Force re-render on delete
+                id="audio-player"
+                src={audioUrl}
+                controls
+                className="w-full h-10"
+              />
+              <div className="flex space-x-4 justify-center">
+                <button
+                  onClick={deleteAudio}
+                  className="py-2 px-4 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 transition"
+                >
+                  Delete
+                </button>
+                <button
+                  onClick={saveAudio}
+                  className="py-2 px-4 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition"
+                >
+                  Save
+                </button>
+              </div>
             </div>
           )}
         </div>
